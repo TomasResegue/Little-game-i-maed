@@ -1,0 +1,531 @@
+local gameState = "difficultySelect"
+local difficulty = "medium"
+local enemySpeedMap = {
+    easy = 50,
+    medium = 75,
+    hard = 100,
+    impossible = 150
+}
+local enemySpawnIntervalMap = {
+    easy = 1.5,
+    medium = 1,
+    hard = 0.75,
+    impossible = 0.5
+}
+
+local wave = 1
+local enemiesPerWave = 10
+local enemiesCleared = 0
+local waveCompleteTimer = 0
+local waveCompleteDuration = 3  -- 3 seconds between waves
+local safeZoneRadius = 100  -- Radius around player where zombies can't spawn
+
+local obstacles = {}
+local obstacleSize = 30  -- Smaller obstacle size
+local maxObstacles = 10  -- Maximum number of obstacles allowed
+
+-- Initialize wave-specific variables
+waveSpeedIncrease = 0
+obstacleIncreaseThreshold = {
+    easy = 5,
+    medium = 4,
+    hard = 3,
+    impossible = 1
+}
+
+local impossibleObstacleCount = 5  -- Set number of obstacles for impossible mode
+
+function love.load()
+    -- Load the moon surface background
+    moonSurface = love.graphics.newImage("moon_surface.png")
+
+    -- Initialize game state
+    player = {
+        x = 400, y = 300,  -- Start player at center of screen
+        width = 40, height = 40,  -- Slightly smaller hitbox
+        speed = 200, image = love.graphics.newImage("player.png"),
+        lives = 3,
+        invincible = false,
+        invincibleTimer = 0,
+        facingRight = true,
+        shootingUp = false,
+        shootingDown = false
+    }
+
+    -- Create obstacles for impossible mode
+    if difficulty == "impossible" then
+        createObstacles()
+    else
+        obstacles = {}
+    end
+
+    enemies = {}
+    bullets = {}
+    score = 0
+  
+    -- Create enemy spawn timer
+    enemySpawnTimer = 0
+    enemySpawnInterval = enemySpawnIntervalMap[difficulty]
+
+    -- Reset wave and enemies cleared
+    wave = 1
+    enemiesCleared = 0
+
+    -- Create initial obstacles for impossible mode
+    if difficulty == "impossible" then
+        for i = 1, impossibleObstacleCount do
+            addObstacle()
+        end
+    end
+end
+
+function createObstacles()
+    local numObstacles = math.min(#obstacles + 1, maxObstacles)
+    obstacles = {}
+    for i = 1, numObstacles do
+        local obstacle
+        repeat
+            obstacle = {
+                x = math.random(0, 800 - obstacleSize),
+                y = math.random(0, 600 - obstacleSize),
+                width = obstacleSize,
+                height = obstacleSize
+            }
+        until not checkCollision(obstacle, player) and not isInSafeZone(obstacle) and not obstacleOverlap(obstacle)
+        table.insert(obstacles, obstacle)
+    end
+end
+
+function checkCollision(a, b)
+    return a.x < b.x + b.width and
+           a.x + a.width > b.x and
+           a.y < b.y + b.height and
+           a.y + a.height > b.y
+end
+
+function isInSafeZone(entity)
+    local dx = (player.x + player.width / 2) - (entity.x + entity.width / 2)
+    local dy = (player.y + player.height / 2) - (entity.y + entity.height / 2)
+    local distanceSquared = dx * dx + dy * dy
+    return distanceSquared < safeZoneRadius * safeZoneRadius
+end
+
+function obstacleOverlap(newObstacle)
+    for _, obstacle in ipairs(obstacles) do
+        if checkCollision(newObstacle, obstacle) then
+            return true
+        end
+    end
+    return false
+end
+
+function love.update(dt)
+    if gameState == "playing" then
+        if waveCompleteTimer > 0 then
+            waveCompleteTimer = waveCompleteTimer - dt
+            if waveCompleteTimer <= 0 then
+                -- Start the next wave
+                wave = wave + 1
+                enemiesCleared = 0
+                waveCompleteTimer = 0
+            end
+        else
+            updateGame(dt)
+        end
+    end
+end
+
+function updateGame(dt)
+    -- Move player
+    local newX, newY = player.x, player.y
+    if love.keyboard.isDown("w") then
+        newY = math.max(newY - player.speed * dt, 0)
+    elseif love.keyboard.isDown("s") then
+        newY = math.min(newY + player.speed * dt, 600 - player.height)
+    end
+    if love.keyboard.isDown("a") then
+        newX = math.max(newX - player.speed * dt, 0)
+    elseif love.keyboard.isDown("d") then
+        newX = math.min(newX + player.speed * dt, 800 - player.width)
+    end
+
+    -- Check collision with obstacles
+    local canMove = true
+    for _, obstacle in ipairs(obstacles) do
+        if checkCollision({x = newX, y = newY, width = player.width, height = player.height}, obstacle) then
+            canMove = false
+            break
+        end
+    end
+    if canMove then
+        player.x, player.y = newX, newY
+    end
+  
+    -- Update invincibility
+    if player.invincible then
+        player.invincibleTimer = player.invincibleTimer - dt
+        if player.invincibleTimer <= 0 then
+            player.invincible = false
+        end
+    end
+
+    -- Spawn enemies
+    enemySpawnTimer = enemySpawnTimer - dt
+    if enemySpawnTimer <= 0 and #enemies < wave * enemiesPerWave - enemiesCleared then
+        enemySpawnTimer = enemySpawnInterval
+        local enemy = createEnemy()
+        enemy.speed = enemy.speed + waveSpeedIncrease  -- Apply wave speed increase
+        table.insert(enemies, enemy)
+    end
+  
+    -- Update enemies and check player collision
+    for i = #enemies, 1, -1 do
+        local enemy = enemies[i]
+        
+        -- Calculate direction to player
+        local dx = player.x - enemy.x
+        local dy = player.y - enemy.y
+        local distance = math.sqrt(dx*dx + dy*dy)
+        
+        if distance > 0 then
+            local moveX = enemy.x + (dx / distance) * enemy.speed * dt
+            local moveY = enemy.y + (dy / distance) * enemy.speed * dt
+            
+            -- Check if the new position is close to an obstacle
+            local avoidanceForce = {x = 0, y = 0}
+            for _, obstacle in ipairs(obstacles) do
+                local obstacleDistance = math.sqrt((moveX - obstacle.x)^2 + (moveY - obstacle.y)^2)
+                if obstacleDistance < 30 then  -- Avoidance radius
+                    local forceX = moveX - obstacle.x
+                    local forceY = moveY - obstacle.y
+                    local forceMagnitude = 30 - obstacleDistance
+                    avoidanceForce.x = avoidanceForce.x + forceX * forceMagnitude
+                    avoidanceForce.y = avoidanceForce.y + forceY * forceMagnitude
+                end
+            end
+            
+            -- Apply avoidance force
+            moveX = moveX + avoidanceForce.x * dt
+            moveY = moveY + avoidanceForce.y * dt
+            
+            -- Update enemy position
+            enemy.x = moveX
+            enemy.y = moveY
+        end
+
+        -- Check collision with player
+        if not player.invincible and checkCollision(player, enemy) then
+            player.lives = player.lives - 1
+            player.invincible = true
+            player.invincibleTimer = 2 -- 2 seconds of invincibility
+            if player.lives <= 0 then
+                gameState = "gameOver"
+            end
+            table.remove(enemies, i)  -- Remove the enemy that hit the player
+        end
+    end
+  
+    -- Update bullets
+    for i = #bullets, 1, -1 do
+        local bullet = bullets[i]
+        if bullet.direction == "up" then
+            bullet.y = bullet.y + bullet.speed * dt
+        elseif bullet.direction == "down" then
+            bullet.y = bullet.y + bullet.speed * dt
+        else
+            bullet.x = bullet.x + bullet.speed * dt
+        end
+        if bullet.x < 0 or bullet.x > 800 or bullet.y < 0 or bullet.y > 600 then
+            table.remove(bullets, i)
+        end
+    end
+  
+    -- Check bullet-enemy collisions
+    for i = #enemies, 1, -1 do
+        local enemy = enemies[i]
+        for j = #bullets, 1, -1 do
+            local bullet = bullets[j]
+            if checkCollision(bullet, enemy) then
+                table.remove(enemies, i)
+                table.remove(bullets, j)
+                score = score + 1
+                enemiesCleared = enemiesCleared + 1
+                
+                -- Check if wave is completed
+                if enemiesCleared >= wave * enemiesPerWave then
+                    waveCompleteTimer = waveCompleteDuration
+                    -- Clear remaining enemies
+                    enemies = {}
+                end
+                
+                break
+            end
+        end
+    end
+
+    -- Check if 'j' or 'k' key is being held
+    player.shootingUp = love.keyboard.isDown('j')
+    player.shootingDown = love.keyboard.isDown('k')
+end
+
+function createEnemy()
+    local enemy
+    repeat
+        local x = math.random(0, 800 - 50)
+        local y = math.random(0, 600 - 50)
+        enemy = {
+            x = x,
+            y = y,
+            speed = enemySpeedMap[difficulty],
+            image = love.graphics.newImage("zombie.png"),
+            width = 50,
+            height = 50
+        }
+    until not isInSafeZone(enemy) and not checkObstacleCollision(enemy)
+    return enemy
+end
+
+function love.draw()
+    if gameState == "difficultySelect" then
+        drawDifficultySelect()
+    elseif gameState == "playing" then
+        drawGame()
+        if waveCompleteTimer > 0 then
+            drawWaveComplete()
+        end
+    elseif gameState == "gameOver" then
+        drawGameOver()
+    end
+end
+
+function drawDifficultySelect()
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.print("Select Difficulty:", 300, 200)
+    love.graphics.print("1. Easy", 300, 250)
+    love.graphics.print("2. Medium", 300, 300)
+    love.graphics.print("3. Hard", 300, 350)
+    love.graphics.print("4. Impossible", 300, 400)
+    love.graphics.print("Press the number to start", 300, 450)
+end
+
+function drawGame()
+    -- Draw the moon surface background
+    love.graphics.draw(moonSurface, 0, 0, 0, love.graphics.getWidth() / moonSurface:getWidth(), love.graphics.getHeight() / moonSurface:getHeight())
+
+    -- Draw player
+    love.graphics.setColor(1, 1, 1, player.invincible and 0.5 or 1)
+    if player.shootingUp then
+        -- Draw player facing upwards
+        love.graphics.draw(player.image, player.x, player.y + player.height, -math.pi/2, 
+                           player.width / player.image:getWidth(), 
+                           player.height / player.image:getHeight())
+    elseif player.shootingDown then
+        -- Draw player facing downwards
+        love.graphics.draw(player.image, player.x + player.width, player.y, math.pi/2, 
+                           player.width / player.image:getWidth(), 
+                           player.height / player.image:getHeight())
+    else
+        -- Draw player facing left or right
+        love.graphics.draw(player.image, player.x + (player.facingRight and player.width or 0), player.y, 0, 
+                           player.facingRight and player.width / player.image:getWidth() or -player.width / player.image:getWidth(), 
+                           player.height / player.image:getHeight(), 
+                           player.facingRight and 0 or player.width, 0)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+  
+    -- Draw enemies
+    for _, enemy in ipairs(enemies) do
+        love.graphics.draw(enemy.image, enemy.x, enemy.y, 0, enemy.width / enemy.image:getWidth(), enemy.height / enemy.image:getHeight())
+    end
+  
+    -- Draw bullets
+    for _, bullet in ipairs(bullets) do
+        love.graphics.rectangle("fill", bullet.x, bullet.y, bullet.width, bullet.height)
+    end
+  
+    -- Draw score, lives, difficulty, wave, and progress
+    love.graphics.print("Score: " .. score, 10, 10)
+    love.graphics.print("Lives: " .. player.lives, 10, 30)
+    love.graphics.print("Difficulty: " .. difficulty, 10, 50)
+    love.graphics.print("Wave: " .. wave, 10, 70)
+    love.graphics.print("Enemies Cleared: " .. enemiesCleared .. "/" .. (wave * enemiesPerWave), 10, 90)
+
+    -- Draw obstacles
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    for _, obstacle in ipairs(obstacles) do
+        love.graphics.rectangle("fill", obstacle.x, obstacle.y, obstacle.width, obstacle.height)
+    end
+    love.graphics.setColor(1, 1, 1)
+end
+
+function drawWaveComplete()
+    love.graphics.setColor(0, 0, 0, 0.7)
+    love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.print("Wave " .. wave .. " Completed!", 300, 250, 0, 2, 2)
+    love.graphics.print("Prepare for next wave...", 300, 300)
+    love.graphics.print("Next wave starts in: " .. math.ceil(waveCompleteTimer), 300, 350)
+
+    -- Increase enemy speed for the next wave
+    waveSpeedIncrease = waveSpeedIncrease + 0.1
+
+    -- Shuffle existing obstacles
+    shuffleObstacles()
+
+    -- Add one obstacle after each wave if conditions are met and it's not impossible mode
+    if difficulty ~= "impossible" and wave >= obstacleIncreaseThreshold[difficulty] and #obstacles < maxObstacles then
+        addObstacle()
+    end
+end
+
+function shuffleObstacles()
+    for _, obstacle in ipairs(obstacles) do
+        local newPosition
+        repeat
+            newPosition = {
+                x = math.random(0, 800 - obstacleSize),
+                y = math.random(0, 600 - obstacleSize),
+                width = obstacleSize,
+                height = obstacleSize
+            }
+        until not checkCollision(newPosition, player) and not isInSafeZone(newPosition) and not obstacleOverlap(newPosition)
+        obstacle.x = newPosition.x
+        obstacle.y = newPosition.y
+    end
+end
+
+function addObstacle()
+    local newObstacle
+    repeat
+        newObstacle = {
+            x = math.random(0, 800 - obstacleSize),
+            y = math.random(0, 600 - obstacleSize),
+            width = obstacleSize,
+            height = obstacleSize
+        }
+    until not checkCollision(newObstacle, player) and not isInSafeZone(newObstacle) and not obstacleOverlap(newObstacle)
+    table.insert(obstacles, newObstacle)
+end
+
+function drawGameOver()
+    love.graphics.setColor(1, 0, 0)
+    love.graphics.print("GAME OVER", 300, 250, 0, 2, 2)
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.print("You were killed!", 300, 300)
+    love.graphics.print("Final Score: " .. score, 300, 350)
+    love.graphics.print("Waves Completed: " .. (wave - 1), 300, 375)
+    love.graphics.print("Press 'R' to restart", 300, 425)
+end
+  
+function love.keypressed(key)
+    if gameState == "difficultySelect" then
+        if key == "1" then
+            difficulty = "easy"
+            gameState = "playing"
+        elseif key == "2" then
+            difficulty = "medium"
+            gameState = "playing"
+        elseif key == "3" then
+            difficulty = "hard"
+            gameState = "playing"
+        elseif key == "4" then
+            difficulty = "impossible"
+            gameState = "playing"
+        end
+        if gameState == "playing" then
+            enemySpawnInterval = enemySpawnIntervalMap[difficulty]
+            waveSpeedIncrease = 0
+            obstacles = {}
+            if difficulty == "impossible" then
+                for i = 1, impossibleObstacleCount do
+                    addObstacle()
+                end
+            end
+        end
+    elseif gameState == "playing" then
+        if key == "l" then
+            player.facingRight = not player.facingRight
+        elseif key == "space" then
+            local bullet
+            if player.shootingUp then
+                bullet = {
+                    x = player.x + player.width / 2,
+                    y = player.y,
+                    speed = -500,  -- Negative speed for upward movement
+                    width = 5,
+                    height = 5,
+                    direction = "up"
+                }
+            elseif player.shootingDown then
+                bullet = {
+                    x = player.x + player.width / 2,
+                    y = player.y + player.height,
+                    speed = 500,  -- Positive speed for downward movement
+                    width = 5,
+                    height = 5,
+                    direction = "down"
+                }
+            else
+                bullet = {
+                    x = player.x + (player.facingRight and player.width or 0),
+                    y = player.y + player.height / 2,
+                    speed = player.facingRight and 500 or -500,
+                    width = 5,
+                    height = 5,
+                    direction = player.facingRight and "right" or "left"
+                }
+            end
+            table.insert(bullets, bullet)
+        end
+    elseif gameState == "gameOver" then
+        if key == "r" then
+            gameState = "difficultySelect"
+            love.load()  -- Reset the game
+        end
+    end
+end
+
+function checkObstacleCollision(entity)
+    for _, obstacle in ipairs(obstacles) do
+        if entity.x < obstacle.x + obstacle.width and
+           entity.x + entity.width > obstacle.x and
+           entity.y < obstacle.y + obstacle.height and
+           entity.y + entity.height > obstacle.y then
+            return true
+        end
+    end
+    return false
+end
+
+-- Add this function to check if a position is valid (not inside an obstacle)
+function isValidPosition(x, y)
+    for _, obstacle in ipairs(obstacles) do
+        if x < obstacle.x + obstacle.width and
+           x + 50 > obstacle.x and
+           y < obstacle.y + obstacle.height and
+           y + 50 > obstacle.y then
+            return false
+        end
+    end
+    return true
+end
+
+-- Add this function to find a path around obstacles
+function findPathAroundObstacle(enemy, targetX, targetY)
+    local directions = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}}  -- Up, Right, Down, Left
+    for _, dir in ipairs(directions) do
+        local newX = enemy.x + dir[1] * enemy.speed
+        local newY = enemy.y + dir[2] * enemy.speed
+        if isValidPosition(newX, newY) then
+            local dx = targetX - newX
+            local dy = targetY - newY
+            if math.abs(dx) > math.abs(dy) then
+                return newX, enemy.y
+            else
+                return enemy.x, newY
+            end
+        end
+    end
+    return enemy.x, enemy.y  -- If no valid direction, stay in place
+end
+

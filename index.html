@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>Zombie Shooter on the Moon</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="game-container"></div>
+  <script src="path/to/love.js"></script>
+  <script>
+    var script = document.createElement('script');
+    script.onload = function () {
+      var canvas = document.createElement('canvas');
+      var gameContainer = document.getElementById('game-container');
+      gameContainer.appendChild(canvas);
+      Love(canvas, { arguments: ['./'] });
+    };
+    script.src = 'path/to/love.js';
+    document.head.appendChild(script);
+  </script>
+</body>
+</html>
